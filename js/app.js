@@ -141,65 +141,6 @@ let currentMode = 'kitchen'; // 'kitchen' | 'bar'
           return activeIngredients.map(i => i.raw.trim()).filter(Boolean).join(' + ');
         }
 
-        // ---- LA2: Best-effort Türkçe çeviri (MyMemory, cache'li; kota/hatada İngilizce kalır) ----
-        const TR_CACHE_KEY = 'lezzet_tr_cache_v1';
-        function getTrCached(key) {
-          try { return JSON.parse(localStorage.getItem(TR_CACHE_KEY) || '{}')[key] || null; } catch(e) { return null; }
-        }
-        function setTrCached(key, val) {
-          try {
-            const c = JSON.parse(localStorage.getItem(TR_CACHE_KEY) || '{}');
-            c[key] = val;
-            const ks = Object.keys(c);
-            if (ks.length > 200) delete c[ks[0]];
-            localStorage.setItem(TR_CACHE_KEY, JSON.stringify(c));
-          } catch(e) {}
-        }
-        async function trChunk(text) {
-          try {
-            const url = 'https://api.mymemory.translated.net/get?q=' + encodeURIComponent(text.slice(0, 480)) + '&langpair=en|tr';
-            const res = await fetch(url);
-            const data = await res.json();
-            const out = data && data.responseData && data.responseData.translatedText;
-            if (out && !/MYMEMORY WARNING/i.test(out)) return out.trim();
-          } catch(e) {}
-          return null;
-        }
-        async function translateToTr(text) {
-          if (!text || !text.trim()) return null;
-          const ckey = 'instr:' + text.slice(0, 40);
-          const cached = getTrCached(ckey);
-          if (cached) return cached;
-          // Uzun talimatları paragraf paragraf böl, en fazla 5 parça çevir
-          const paras = text.split(/\n+/).map(s => s.trim()).filter(Boolean);
-          const chunks = [];
-          let cur = '';
-          for (const p of paras) {
-            if ((cur + '\n' + p).length > 400 && cur) { chunks.push(cur); cur = p; }
-            else cur = cur ? cur + '\n' + p : p;
-          }
-          if (cur) chunks.push(cur);
-          if (chunks.length > 5) chunks.length = 5;
-          let out = '';
-          for (const c of chunks) {
-            const seg = await trChunk(c);
-            if (seg === null) return null;
-            out = out ? out + '\n' + seg : seg;
-          }
-          if (out.trim()) setTrCached(ckey, out.trim());
-          return out.trim() || null;
-        }
-        async function applyTrToInstructions(original, recipeId) {
-          if (!original || !original.trim()) return;
-          const tr = await translateToTr(original);
-          // Modal hâlâ aynı tarif için açık mı + talimat öğesi yerinde mi?
-          const el = document.getElementById('modal-instructions');
-          const modal = document.getElementById('recipe-modal');
-          if (tr && currentModalRecipe && String(currentModalRecipe.id) === String(recipeId) && modal && !modal.classList.contains('hidden') && el) {
-            el.innerText = tr;
-          }
-        }
-
         function addCustomIngredient(forcedText) {
           const inputEl = document.getElementById('input-ingredient');
           const val = forcedText || (inputEl ? inputEl.value.trim() : '');
@@ -791,10 +732,6 @@ let currentMode = 'kitchen'; // 'kitchen' | 'bar'
               }
 
               instEl.innerText = item.strInstructions || 'Hazırlanış talimatı bulunamadı.';
-              // LA2: Talimatı Türkçe'ye çevir (best-effort, cache'li; kota/hatada İngilizce kalır)
-              if (item.strInstructions && item.strInstructions.trim()) {
-                applyTrToInstructions(item.strInstructions, id);
-              }
             }
 
             updateModalSaveButtonState();
