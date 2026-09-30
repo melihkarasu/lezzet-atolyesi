@@ -136,6 +136,70 @@ let currentMode = 'kitchen'; // 'kitchen' | 'bar'
           return { raw: rawInput.trim(), query: clean.replace(/\s+/g, '_') };
         }
 
+        // Aktif malzemelerin Türkçe etiketlerini birleştir (LA4 başlık)
+        function labelNames() {
+          return activeIngredients.map(i => i.raw.trim()).filter(Boolean).join(' + ');
+        }
+
+        // ---- LA2: Best-effort Türkçe çeviri (MyMemory, cache'li; kota/hatada İngilizce kalır) ----
+        const TR_CACHE_KEY = 'lezzet_tr_cache_v1';
+        function getTrCached(key) {
+          try { return JSON.parse(localStorage.getItem(TR_CACHE_KEY) || '{}')[key] || null; } catch(e) { return null; }
+        }
+        function setTrCached(key, val) {
+          try {
+            const c = JSON.parse(localStorage.getItem(TR_CACHE_KEY) || '{}');
+            c[key] = val;
+            const ks = Object.keys(c);
+            if (ks.length > 200) delete c[ks[0]];
+            localStorage.setItem(TR_CACHE_KEY, JSON.stringify(c));
+          } catch(e) {}
+        }
+        async function trChunk(text) {
+          try {
+            const url = 'https://api.mymemory.translated.net/get?q=' + encodeURIComponent(text.slice(0, 480)) + '&langpair=en|tr';
+            const res = await fetch(url);
+            const data = await res.json();
+            const out = data && data.responseData && data.responseData.translatedText;
+            if (out && !/MYMEMORY WARNING/i.test(out)) return out.trim();
+          } catch(e) {}
+          return null;
+        }
+        async function translateToTr(text) {
+          if (!text || !text.trim()) return null;
+          const ckey = 'instr:' + text.slice(0, 40);
+          const cached = getTrCached(ckey);
+          if (cached) return cached;
+          // Uzun talimatları paragraf paragraf böl, en fazla 5 parça çevir
+          const paras = text.split(/\n+/).map(s => s.trim()).filter(Boolean);
+          const chunks = [];
+          let cur = '';
+          for (const p of paras) {
+            if ((cur + '\n' + p).length > 400 && cur) { chunks.push(cur); cur = p; }
+            else cur = cur ? cur + '\n' + p : p;
+          }
+          if (cur) chunks.push(cur);
+          if (chunks.length > 5) chunks.length = 5;
+          let out = '';
+          for (const c of chunks) {
+            const seg = await trChunk(c);
+            if (seg === null) return null;
+            out = out ? out + '\n' + seg : seg;
+          }
+          if (out.trim()) setTrCached(ckey, out.trim());
+          return out.trim() || null;
+        }
+        async function applyTrToInstructions(original, recipeId) {
+          if (!original || !original.trim()) return;
+          const tr = await translateToTr(original);
+          // Modal hâlâ aynı tarif için açık mı + talimat öğesi yerinde mi?
+          const el = document.getElementById('modal-instructions');
+          const modal = document.getElementById('recipe-modal');
+          if (tr && currentModalRecipe && String(currentModalRecipe.id) === String(recipeId) && modal && !modal.classList.contains('hidden') && el) {
+            el.innerText = tr;
+          }
+        }
+
         function addCustomIngredient(forcedText) {
           const inputEl = document.getElementById('input-ingredient');
           const val = forcedText || (inputEl ? inputEl.value.trim() : '');
@@ -412,10 +476,48 @@ let currentMode = 'kitchen'; // 'kitchen' | 'bar'
 
               renderRecipeList(combined, `"${displayLabel}" içeren yemekler`);
             } else {
-              const res = await fetch(`https://www.thecocktaildb.com/api/json/v1/1/filter.php?i=${encodeURIComponent(ing)}`);
-              const data = await res.json();
-              const drinks = (data.drinks || []).map(d => ({ ...d, _source: 'cocktaildb' }));
-              renderRecipeList(drinks, `"${displayLabel}" içeren kokteyller`);
+              // Miksoloji Barı: tüm aktif malzemeleri içeren kokteyller (AND kesisimi)
+              const ingList = activeIngredients.length > 0
+                ? activeIngredients.map(i => i.query)
+                : [ing];
+
+              if (ingList.length === 1) {
+                const res = await fetch(`https://www.thecocktaildb.com/api/json/v1/1/filter.php?i=${encodeURIComponent(ingList[0])}`);
+                const data = await res.json();
+                const drinks = (data.drinks || []).map(d => ({ ...d, _source: 'cocktaildb' }));
+                renderRecipeList(drinks, `"${displayLabel}" içeren kokteyller`);
+              } else {
+                // Her malzeme için sonuç kümesini topla, kesişmeyi al
+                const allRes = await Promise.allSettled(
+                  ingList.map(ingk =>
+                    fetch(`https://www.thecocktaildb.com/api/json/v1/1/filter.php?i=${encodeURIComponent(ingk)}`).then(r => r.json())
+                  )
+                );
+                const sets = [];
+                for (const r of allRes) {
+                  if (r.status === 'fulfilled' && r.value && r.value.drinks) {
+                    sets.push(new Set(r.value.drinks.map(d => d.idDrink)));
+                  } else {
+                    sets.push(null);
+                  }
+                }
+                if (sets.some(s => s === null) || sets.length < ingList.length) {
+                  renderRecipeList([], `"${labelNames() || displayLabel}" içeren kokteyller (kesişim alınamadı)`);
+                  return;
+                }
+                // AND: tüm kümelerde ortak olanlar
+                let inter = Array.from(sets[0]);
+                for (let i = 1; i < sets.length; i++) inter = inter.filter(id => sets[i].has(id));
+                // Kesişimdeki id'lerin detaylarını topla
+                const detail = {};
+                for (const r of allRes) {
+                  if (r.status === 'fulfilled' && r.value && r.value.drinks) {
+                    r.value.drinks.forEach(d => { if (inter.includes(d.idDrink)) detail[d.idDrink] = { ...d, _source: 'cocktaildb' }; });
+                  }
+                }
+                const drinks = inter.map(id => detail[id]).filter(Boolean);
+                renderRecipeList(drinks, `"${labelNames() || displayLabel}" kokteylleri (tüm malzemeler)`);
+              }
             }
           } catch(e) {
             showLoading(false);
@@ -619,7 +721,7 @@ let currentMode = 'kitchen'; // 'kitchen' | 'bar'
 
               if (recipe.source_url) {
                 videoBox.innerHTML = `
-                  <a href="${recipe.source_url}" target="_blank" rel="noopener noreferrer" class="px-3.5 py-1.5 rounded-xl bg-gradient-to-r from-amber-600 to-orange-600 hover:from-amber-500 hover:to-orange-500 text-white text-xs font-semibold flex items-center gap-1.5 transition shadow">
+                  <a href="${recipe.source_url}" target="_blank" rel="noopener noreferrer" class="px-3.5 py-1.5 rounded-xl bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold flex items-center gap-1.5 transition shadow">
                     <span>📖</span> Orijinal Tarifi Aç (${recipe.publisher}) &rarr;
                   </a>
                 `;
@@ -689,6 +791,10 @@ let currentMode = 'kitchen'; // 'kitchen' | 'bar'
               }
 
               instEl.innerText = item.strInstructions || 'Hazırlanış talimatı bulunamadı.';
+              // LA2: Talimatı Türkçe'ye çevir (best-effort, cache'li; kota/hatada İngilizce kalır)
+              if (item.strInstructions && item.strInstructions.trim()) {
+                applyTrToInstructions(item.strInstructions, id);
+              }
             }
 
             updateModalSaveButtonState();
